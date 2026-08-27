@@ -7,14 +7,16 @@
 // canonical ACP bridge shipped in host.ts.
 import { type BbPluginApi, type PluginCliContext } from "@get-bb/plugin-sdk";
 import { agyHostContract } from "./contract.js";
-import { expandHome, probeLocal, runInstall, type InstallResult } from "./install.js";
+import { probeLocal, runInstall, type InstallResult } from "./install.js";
 
 const PROVIDER_ID = "acp-antigravity";
 
 export default async function plugin(bb: BbPluginApi) {
-  // Where the ACP server lives on target machines. Install runs on the host,
-  // so `~` expands on that host; the launch env below is server-side and uses
-  // the server's home for the common single-machine setup.
+  // Where the ACP server lives on target machines. Installs run on each host
+  // (`bb antigravity-acp install [--machine ...]`), so `~` expands per host.
+  // The launch spec sets no env: the server binary and its sandbox helper are
+  // linked into binDir on every machine and found via PATH, like bb's builtin
+  // ACP agents.
   const settings = bb.settings.define({
     installDir: {
       type: "string",
@@ -28,16 +30,8 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Symlinks to the server binary and its sandbox helper go here.",
       default: "~/.local/bin",
     },
-    harnessPath: {
-      type: "string",
-      label: "ANTIGRAVITY_HARNESS_PATH override",
-      description: "Absolute path to the sandbox helper. Empty = auto (`installDir`/localharness_external).",
-      default: "",
-    },
   });
   const saved = await settings.get();
-  const launchInstallDir = saved.installDir?.trim() || "~/.local/opt/agy-acp-server";
-  const harnessPath = saved.harnessPath?.trim() || `${expandHome(launchInstallDir)}/localharness_external`;
 
   // Immutable launch facts for the ACP server process.
   const LAUNCH = {
@@ -46,13 +40,12 @@ export default async function plugin(bb: BbPluginApi) {
     // `which`; an absolute path also works.
     command: "agy_acp_server.par",
     args: [] as string[],
-    env: {
-      // The ACP server resolves its sandbox helper `localharness_external`
-      // from PATH, ANTIGRAVITY_HARNESS_PATH, or an explicit flag. Point it at
-      // the helper shipped next to the server binary (same directory as the
-      // official distribution zip).
-      ANTIGRAVITY_HARNESS_PATH: harnessPath,
-    } as Record<string, string>,
+    // Env stays empty on purpose: the ACP server resolves its sandbox helper
+    // `localharness_external` from PATH, and `bb antigravity-acp install`
+    // links both the server binary and the helper into binDir on every
+    // machine. A single baked-in ANTIGRAVITY_HARNESS_PATH value would be
+    // wrong on every other machine (settings are shared across hosts).
+    env: {} as Record<string, string>,
   };
 
   const host = bb.hosts.experimental_client({ contract: agyHostContract });
@@ -154,9 +147,10 @@ export default async function plugin(bb: BbPluginApi) {
       target: target.hostId
         ? `${target.label}${probe.ok ? "" : " (probe failed)"}`
         : target.error ?? "this machine (server)",
+      platform: [probe.platform, probe.arch].filter(Boolean).join(" ") || "unknown",
       installDir: current.installDir,
       binDir: current.binDir,
-      harnessPath: LAUNCH.env.ANTIGRAVITY_HARNESS_PATH,
+      harnessPath: probe.harnessPath,
       resolvedBinary: probe.binaryPath,
       ready: probe.ok,
       hint:
@@ -171,8 +165,9 @@ export default async function plugin(bb: BbPluginApi) {
         `displayName:   ${status.displayName}`,
         `command:       ${status.command}`,
         `target:        ${status.target}`,
+        `platform:      ${status.platform}`,
         `binary:        ${status.resolvedBinary ?? "NOT FOUND"}`,
-        `harnessPath:   ${status.harnessPath}`,
+        `harnessPath:   ${status.harnessPath ?? "NOT FOUND"}`,
         `installDir:    ${status.installDir}`,
         `binDir:        ${status.binDir}`,
         "",
@@ -192,7 +187,6 @@ export default async function plugin(bb: BbPluginApi) {
     const installDirFlag = flagValue(argv, "--install-dir");
     const binDirFlag = flagValue(argv, "--bin-dir");
     const source = flagValue(argv, "--from");
-    const ephemeral = installDirFlag !== undefined || binDirFlag !== undefined;
     const current = await settings.get();
     const installDir = installDirFlag ?? (current.installDir?.trim() || "~/.local/opt/agy-acp-server");
     const binDir = binDirFlag ?? (current.binDir?.trim() || "~/.local/bin");
@@ -219,27 +213,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     if (!result.ok) return finish(json, result, result.error ?? "Install failed");
-
-    // Persist what the install actually resolved so the launch env follows on
-    // reload. Skipped when one-off dir flags were passed; settings are the
-    // durable "this is where the server lives" record. Paths come back
-    // host-expanded, so a remote install still writes host-absolute values.
-    if (!ephemeral) {
-      try {
-        const patch: Record<string, string> = {};
-        if (result.installDir !== current.installDir) patch.installDir = result.installDir;
-        if (result.binDir !== current.binDir) patch.binDir = result.binDir;
-        if (result.harnessPath && result.harnessPath !== current.harnessPath) patch.harnessPath = result.harnessPath;
-        if (Object.keys(patch).length > 0) {
-          await bb.sdk.plugins.updateSettings({ pluginId: bb.pluginId, values: patch });
-          result.notes.push(
-            "Saved install paths to the plugin settings. Run `bb plugin reload antigravity-acp` to apply the launch env.",
-          );
-        }
-      } catch (err) {
-        result.notes.push(`Could not save install paths to settings: ${(err as Error).message}`);
-      }
-    }
 
     const lines = [
       result.alreadyInstalled ? "Already installed — links refreshed." : "Installed.",

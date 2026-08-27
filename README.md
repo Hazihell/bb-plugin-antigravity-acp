@@ -15,8 +15,8 @@ builtin ACP agents:
   `provider-acp` plugin uses) and implements the host RPC the install/status
   commands call, so installs run on the target machine, not on the bb server.
 - `install.ts` — shared install logic: resolves the official distribution
-  from the ACP registry, downloads, extracts, links binaries onto PATH, and
-  points `ANTIGRAVITY_HARNESS_PATH` at the sandbox helper.
+  from the ACP registry, downloads, extracts, and links the server binary and
+  sandbox helper onto PATH (no environment variables needed).
 - `icons/antigravity.svg` — provider mark (path-shaped, theme-tinted).
 
 ## Install the plugin
@@ -43,9 +43,21 @@ thread's host, or `--machine <id-or-name>` to pick another enrolled machine):
 - symlinks `agy_acp_server.par` and its sandbox helper `localharness_external`
   into `~/.local/bin` (configurable via `--bin-dir` / `binDir`); on Windows it
   copies them and appends the dir to the user PATH;
-- makes the binaries executable and records the install in a manifest;
-- saves the resolved paths to the plugin settings so the provider launch env
-  (`ANTIGRAVITY_HARNESS_PATH`) matches, then asks you to reload the plugin.
+- makes the binaries executable and records the install in a manifest.
+
+Install once per machine that should run Antigravity threads. The provider
+only appears on a machine where the health probe finds `agy_acp_server.par`
+on PATH; the ACP server finds the sandbox helper on PATH too (the install
+links both into `binDir`), so no per-machine environment variables are
+needed.
+
+```sh
+bb antigravity-acp install --machine macbook        # this machine
+bb antigravity-acp install --machine other-host     # another enrolled machine
+```
+
+The machine's daemon shell must have `binDir` on PATH. The command warns
+when it is not; pick a dir that is (e.g. `/usr/local/bin`) with `--bin-dir`.
 
 Useful flags:
 
