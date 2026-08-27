@@ -22,6 +22,9 @@
   },
   "include": [
     "server.ts",
+    "host.ts",
+    "contract.ts",
+    "install.ts",
     "app.tsx",
     "components",
     "lib",

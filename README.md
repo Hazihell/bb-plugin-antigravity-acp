@@ -7,50 +7,66 @@ Registers the `acp-antigravity` provider (family `acp`), exactly like bb's
 builtin ACP agents:
 
 - `server.ts` — `bb.providers.register` with the launch spec in
-  `experimental_bridgeOptions.acpLaunchSpec` (plus a `bb antigravity-acp status`
-  diagnostic command).
+  `experimental_bridgeOptions.acpLaunchSpec`; plugin settings for install
+  paths; the `bb antigravity-acp status` and `bb antigravity-acp install`
+  commands.
 - `host.ts` — re-exports the canonical ACP provider bridge
-  (`@get-bb/plugin-sdk/provider-bridge/acp`), the same bridge the builtin
-  `provider-acp` plugin uses.
+  (`@get-bb/plugin-sdk/provider-bridge/acp`, the same bridge the builtin
+  `provider-acp` plugin uses) and implements the host RPC the install/status
+  commands call, so installs run on the target machine, not on the bb server.
+- `install.ts` — shared install logic: resolves the official distribution
+  from the ACP registry, downloads, extracts, links binaries onto PATH, and
+  points `ANTIGRAVITY_HARNESS_PATH` at the sandbox helper.
 - `icons/antigravity.svg` — provider mark (path-shaped, theme-tinted).
+
+## Install the plugin
+
+```sh
+bb plugin install .      # from this directory
+bb plugin reload antigravity-acp
+```
 
 ## Install the server binary
 
-1. Download the official ACP server for your platform. The current ACP Registry
-   listing (agentclientprotocol/registry → `antigravity-acp`) points at
-   `https://dl.google.com/agy-extensions/releases/...` — for macOS arm64:
+```sh
+bb antigravity-acp install
+```
 
-   ```sh
-   curl -L -o /tmp/agy-acp.zip https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_20260818_01_RC01-darwin-arm64.zip
-   mkdir -p ~/.local/opt/agy-acp-server
-   unzip -o /tmp/agy-acp.zip -d ~/.local/opt/agy-acp-server
-   ```
+The command runs on the machine that will launch the agent (the current
+thread's host, or `--machine <id-or-name>` to pick another enrolled machine):
 
-2. Put both binaries on PATH (the server needs its sandbox helper
-   `localharness_external` next to it or via `ANTIGRAVITY_HARNESS_PATH`):
+- detects the platform/arch and takes the official zip URL for it from the
+  ACP registry (`agentclientprotocol/registry` → `antigravity-acp`), falling
+  back to a pinned copy embedded in the plugin;
+- downloads and extracts into `~/.local/opt/agy-acp-server` (configurable via
+  `--install-dir`, or the `installDir` plugin setting);
+- symlinks `agy_acp_server.par` and its sandbox helper `localharness_external`
+  into `~/.local/bin` (configurable via `--bin-dir` / `binDir`); on Windows it
+  copies them and appends the dir to the user PATH;
+- makes the binaries executable and records the install in a manifest;
+- saves the resolved paths to the plugin settings so the provider launch env
+  (`ANTIGRAVITY_HARNESS_PATH`) matches, then asks you to reload the plugin.
 
-   ```sh
-   ln -s ~/.local/opt/agy-acp-server/agy_acp_server.par ~/.local/bin/agy_acp_server.par
-   ln -s ~/.local/opt/agy-acp-server/localharness_external ~/.local/bin/localharness_external
-   ```
+Useful flags:
 
-   The launch spec in `server.ts` also sets `ANTIGRAVITY_HARNESS_PATH`
-   explicitly; adjust it if your server lives elsewhere.
+```sh
+bb antigravity-acp install --machine macbook        # install on a specific machine
+bb antigravity-acp install --force                  # re-download even if already installed
+bb antigravity-acp install --from ./agy-acp.zip     # explicit source (URL or local file)
+bb antigravity-acp install --json                   # machine-readable output
+```
 
-3. Install / reload the plugin:
+`~/.local/bin` must be on the machine's PATH for the provider health probe to
+find the server. The command warns when it is not.
 
-   ```sh
-   bb plugin install .      # from this directory
-   bb plugin reload antigravity-acp
-   ```
+## Verify
 
-4. Verify:
-
-   ```sh
-   bb provider list                 # acp-antigravity appears (visibility: installed)
-   bb provider models acp-antigravity
-   bb thread spawn --provider acp-antigravity --prompt 'hi'
-   ```
+```sh
+bb antigravity-acp status            # where the server is, per machine
+bb provider list                     # acp-antigravity appears (visibility: installed)
+bb provider models acp-antigravity
+bb thread spawn --provider acp-antigravity --prompt 'hi'
+```
 
 ## Auth
 
