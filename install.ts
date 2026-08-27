@@ -181,11 +181,23 @@ async function extractZip(zipPath: string, destDir: string, isWindows: boolean):
     await execFileAsync("tar", ["-xf", zipPath, "-C", destDir]);
     return;
   }
-  try {
-    await execFileAsync("unzip", ["-oq", zipPath, "-d", destDir]);
-  } catch {
-    await execFileAsync("tar", ["-xf", zipPath, "-C", destDir]);
+  // GNU tar cannot read zip archives; only bsdtar can, so tar is a fallback
+  // (macOS/Windows) while python's zipfile covers minimal Linux servers.
+  const attempts: Array<[string, string[]]> = [
+    ["unzip", ["-oq", zipPath, "-d", destDir]],
+    ["tar", ["-xf", zipPath, "-C", destDir]],
+    ["python3", ["-m", "zipfile", "-e", zipPath, destDir]],
+  ];
+  let lastError: Error | null = null;
+  for (const [cmd, args] of attempts) {
+    try {
+      await execFileAsync(cmd, args);
+      return;
+    } catch (err) {
+      lastError = err as Error;
+    }
   }
+  throw lastError ?? new Error(`No extractor found for ${zipPath}`);
 }
 
 async function helperNameIn(installDir: string, isWindows: boolean): Promise<string | null> {
