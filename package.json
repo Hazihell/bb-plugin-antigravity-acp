@@ -1,6 +1,6 @@
 {
-  "name": "bb-plugin-antigravity-acp",
-  "version": "0.1.2",
+  "name": "bb-plugin-google-antigravity-acp",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
     "bb": ">=0.40",
@@ -10,7 +10,7 @@
     "name": "Google Antigravity (ACP)",
     "description": "Run bb threads on Google Antigravity through its official ACP server (agy_acp_server.par).",
     "branding": {
-      "icon": "./icons/antigravity.svg"
+      "icon": "./icons/google-antigravity.svg"
     },
     "server": "./server.ts",
     "host": "./host.ts"
@@ -20,19 +20,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.22",
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "better-sqlite3": "^12.0.0",
-    "hono": "^4.11.9",
-    "@types/better-sqlite3": "^7.6.12",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "sonner": "^1.7.4",
-    "tailwind-merge": "^3.4.0",
-    "vaul": "^1.1.2",
-    "@pierre/diffs": "^1.2.9"
-  }
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
 }

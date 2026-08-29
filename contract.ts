@@ -8,6 +8,7 @@ export const agyHostContract = defineRpcContract({
       installDir: z.string().min(1),
       binDir: z.string().min(1),
       force: z.boolean(),
+      updatePath: z.boolean(),
       source: z.string().optional(),
     }).strict(),
     output: z.object({
@@ -16,6 +17,8 @@ export const agyHostContract = defineRpcContract({
       arch: z.string(),
       distKey: z.string(),
       url: z.string(),
+      args: z.array(z.string()),
+      registryCommit: z.string(),
       installDir: z.string(),
       binDir: z.string(),
       binaryPath: z.string().nullable(),

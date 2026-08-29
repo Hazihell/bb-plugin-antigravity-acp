@@ -1,4 +1,4 @@
-// Shared install logic for the Antigravity ACP server.
+// Shared install logic for the Google Antigravity ACP server.
 // Runs on the target machine from the host entry, and directly in the server
 // process as the server-local fallback.
 import { execFile } from "node:child_process";
@@ -20,9 +20,17 @@ export interface DistEntry {
 
 export type DistMap = Record<string, DistEntry>;
 
+// ACP registry commit this build is pinned to. The registry is fetched from
+// this exact commit (never from an unpinned `main`), so someone landing a
+// commit on the registry cannot redirect the install to arbitrary binaries.
+// Bump this SHA when the plugin is updated to track newer releases.
+export const REGISTRY_COMMIT = "785dd1f413d9dc2e3433966b079384c5d9e5fc02";
+const REGISTRY_URL = `https://raw.githubusercontent.com/agentclientprotocol/registry/${REGISTRY_COMMIT}/antigravity-acp/agent.json`;
+
 // Mirrors the ACP registry entry (agentclientprotocol/registry →
-// antigravity-acp → distribution.binary). The live registry is fetched first
-// so installs track new releases without a plugin update.
+// antigravity-acp → distribution.binary). Used verbatim when the pinned
+// registry fetch fails or the entry is missing this platform, so installs
+// never depend on a live upstream at install time.
 export const FALLBACK_DIST: DistMap = {
   "darwin-aarch64": {
     archive:
@@ -57,6 +65,12 @@ export interface InstallOptions {
   installDir: string;
   binDir: string;
   force: boolean;
+  /**
+   * Windows only: when true, append binDir to the user PATH via setx
+   * (permanent HKCU\Environment mutation) after linking. Defaults to false —
+   * prefer an explicit opt-in over a silent persistent PATH edit.
+   */
+  updatePath?: boolean;
   /** Optional explicit source: a zip URL or a local zip path. Skips the ACP registry lookup. */
   source?: string;
 }
@@ -67,6 +81,8 @@ export interface InstallResult {
   arch: string;
   distKey: string;
   url: string;
+  args: string[];
+  registryCommit: string;
   installDir: string;
   binDir: string;
   binaryPath: string | null;
@@ -85,7 +101,7 @@ export interface ProbeResult {
   error: string | null;
 }
 
-const MANIFEST = ".antigravity-acp.json";
+const MANIFEST = ".google-antigravity-acp.json";
 
 export function expandHome(p: string): string {
   if (p === "~") return homedir();
@@ -116,10 +132,7 @@ export function detectTarget(): TargetInfo {
 
 export async function fetchDistMap(): Promise<DistMap> {
   try {
-    const res = await fetch(
-      "https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json",
-      { signal: AbortSignal.timeout(10_000) },
-    );
+    const res = await fetch(REGISTRY_URL, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return FALLBACK_DIST;
     const json = (await res.json()) as {
       distribution?: { binary?: Record<string, { archive?: unknown; cmd?: unknown; args?: unknown }> };
@@ -175,18 +188,68 @@ async function downloadTo(url: string, dest: string): Promise<void> {
   );
 }
 
+// Rejects archives whose entries could escape the destination directory.
+// Runs before any extraction so no extractor (including tar fallbacks, which
+// are deliberately not used) can write outside installDir.
+const PYTHON_VALIDATE = String.raw`
+import sys, zipfile
+path = sys.argv[1]
+try:
+    zf = zipfile.ZipFile(path)
+except Exception as e:
+    print(f"not a zip: {e}", file=sys.stderr)
+    sys.exit(2)
+unsafe = []
+for name in zf.namelist():
+    if name.startswith(("/", "\\")) or ":" in name.split("/", 1)[0]:
+        unsafe.append(name)
+        continue
+    parts = name.replace("\\", "/").split("/")
+    if any(p in ("..", "") for p in parts[:-1]):
+        unsafe.append(name)
+if unsafe:
+    print("unsafe zip entries: " + repr(unsafe[:5]), file=sys.stderr)
+    sys.exit(1)
+`;
+
+// Python extraction that first applies the same traversal validation and
+// then extracts with zipfile (which additionally strips absolute paths).
+const PYTHON_EXTRACT = String.raw`
+import sys, zipfile
+path, dest = sys.argv[1], sys.argv[2]
+zf = zipfile.ZipFile(path)
+for name in zf.namelist():
+    if name.startswith(("/", "\\")) or ":" in name.split("/", 1)[0]:
+        print("unsafe zip entry: " + name, file=sys.stderr)
+        sys.exit(1)
+    parts = name.replace("\\", "/").split("/")
+    if any(p in ("..", "") for p in parts[:-1]):
+        print("unsafe zip entry: " + name, file=sys.stderr)
+        sys.exit(1)
+zf.extractall(dest)
+`;
+
 async function extractZip(zipPath: string, destDir: string, isWindows: boolean): Promise<void> {
   if (isWindows) {
-    // Windows ships bsdtar (tar.exe) which reads zip archives.
-    await execFileAsync("tar", ["-xf", zipPath, "-C", destDir]);
+    // PowerShell's Expand-Archive is backed by .NET's ExtractToDirectory,
+    // which rejects entries that escape the destination. No bsdtar here:
+    // bsdtar does not sanitize `../` the way Expand-Archive does.
+    await execFileAsync(
+      "powershell",
+      [
+        "-NoProfile", "-NonInteractive", "-Command",
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`,
+      ],
+      { windowsHide: true },
+    );
     return;
   }
-  // GNU tar cannot read zip archives; only bsdtar can, so tar is a fallback
-  // (macOS/Windows) while python's zipfile covers minimal Linux servers.
+  // macOS/Linux: prefer Info-ZIP unzip (sanitizes `../`), fall back to a
+  // validated python3 zipfile extraction. `tar` is never used: bsdtar does
+  // not sanitize `../` entries, and GNU tar cannot read zip archives anyway.
   const attempts: Array<[string, string[]]> = [
     ["unzip", ["-oq", zipPath, "-d", destDir]],
-    ["tar", ["-xf", zipPath, "-C", destDir]],
-    ["python3", ["-m", "zipfile", "-e", zipPath, destDir]],
+    ["python3", ["-c", PYTHON_EXTRACT, zipPath, destDir]],
   ];
   let lastError: Error | null = null;
   for (const [cmd, args] of attempts) {
@@ -197,7 +260,15 @@ async function extractZip(zipPath: string, destDir: string, isWindows: boolean):
       lastError = err as Error;
     }
   }
-  throw lastError ?? new Error(`No extractor found for ${zipPath}`);
+  // Last resort: validate entry names, then use python3 zipfile if present.
+  try {
+    await execFileAsync("python3", ["-c", PYTHON_VALIDATE, zipPath]);
+    await execFileAsync("python3", ["-c", PYTHON_EXTRACT, zipPath, destDir]);
+    return;
+  } catch (err) {
+    lastError = err as Error;
+  }
+  throw lastError ?? new Error(`No safe extractor found for ${zipPath}`);
 }
 
 async function helperNameIn(installDir: string, isWindows: boolean): Promise<string | null> {
@@ -224,13 +295,28 @@ async function ensureLinked(installDir: string, binDir: string, name: string, is
   }
 }
 
-async function appendUserPathWindows(binDir: string, notes: string[]): Promise<void> {
+// Only runs when the user explicitly opts in via --update-path. setx has a
+// 1024-character truncation hazard, so over-long combined values are skipped
+// with a warning instead of silently corrupting PATH.
+async function appendUserPathWindows(binDir: string, updatePath: boolean, notes: string[]): Promise<void> {
+  if (!updatePath) {
+    notes.push(
+      `Not modifying the user PATH. Add ${binDir} to the user PATH manually (or re-run with --update-path).`,
+    );
+    return;
+  }
   try {
     const { stdout } = await execFileAsync("reg", ["query", "HKCU\\Environment", "/v", "Path"], { windowsHide: true });
     const current = stdout.split(/\r?\n/u).find((l) => /^\s*Path\s+REG/i.test(l))?.replace(/^\s*Path\s+REG[A-Z_]*\s+/i, "").trim() ?? "";
     const parts = current.split(";").filter(Boolean);
     if (parts.includes(binDir)) return;
     const next = [...parts, binDir].join(";");
+    if (next.length > 1024) {
+      notes.push(
+        `User PATH would exceed setx's 1024-char limit after adding ${binDir}; skipping the mutation. Add it manually.`,
+      );
+      return;
+    }
     await execFileAsync("setx", ["Path", next], { windowsHide: true });
     notes.push(`Added ${binDir} to the user PATH (setx). Restart the bb daemon so it takes effect.`);
   } catch (err) {
@@ -238,10 +324,17 @@ async function appendUserPathWindows(binDir: string, notes: string[]): Promise<v
   }
 }
 
-async function writeManifest(installDir: string, url: string, binaryName: string, helper: string | null): Promise<void> {
+async function writeManifest(
+  installDir: string,
+  url: string,
+  binaryName: string,
+  helper: string | null,
+  args: string[],
+  registryCommit: string,
+): Promise<void> {
   await writeFile(
     join(installDir, MANIFEST),
-    JSON.stringify({ url, binaryName, helper, installedAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({ url, binaryName, helper, args, registryCommit, installedAt: new Date().toISOString() }, null, 2),
     "utf8",
   );
 }
@@ -255,8 +348,8 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
   const binaryPath = join(installDir, binaryName);
   const fail = (error: string): InstallResult => ({
     ok: false, platform: target.platform, arch: target.arch, distKey: target.distKey,
-    url: "", installDir, binDir, binaryPath: null, harnessPath: null,
-    alreadyInstalled: false, error, notes,
+    url: "", args: [], registryCommit: REGISTRY_COMMIT, installDir, binDir,
+    binaryPath: null, harnessPath: null, alreadyInstalled: false, error, notes,
   });
 
   const distMap = await fetchDistMap();
@@ -285,6 +378,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
       notes.push("Binary already present; refreshed symlinks without re-downloading.");
       return {
         ok: true, platform: target.platform, arch: target.arch, distKey: target.distKey, url: entry.archive,
+        args: entry.args ?? [], registryCommit: REGISTRY_COMMIT,
         installDir, binDir, binaryPath: link, harnessPath: helper ? join(installDir, helper) : null,
         alreadyInstalled: true, error: null, notes,
       };
@@ -293,7 +387,9 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     }
   }
 
-  const sourceOverride = options.source?.trim() || process.env.AGY_ACP_INSTALL_FROM?.trim();
+  // Explicit --from only. No environment-variable redirect: an env knob can
+  // silently change which archive is downloaded and is easy to forget about.
+  const sourceOverride = options.source?.trim();
   let sourceLabel: string;
   try {
     const zipPath = join(tmpdir(), `agy-acp-${Date.now()}.zip`);
@@ -335,7 +431,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
       if (!target.isWindows) await chmod(full, 0o755);
       notes.push(`Sandbox helper: ${full}`);
     }
-    await writeManifest(installDir, sourceLabel, binaryName, helper);
+    await writeManifest(installDir, sourceLabel, binaryName, helper, entry.args ?? [], REGISTRY_COMMIT);
   } catch (err) {
     notes.push(`Post-install step failed (continuing): ${(err as Error).message}`);
   }
@@ -351,7 +447,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     });
   }
   if (target.isWindows) {
-    await appendUserPathWindows(binDir, notes);
+    await appendUserPathWindows(binDir, options.updatePath === true, notes);
   }
   const harnessPath = helper ? join(installDir, helper) : null;
 
@@ -364,6 +460,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
 
   return {
     ok: true, platform: target.platform, arch: target.arch, distKey: target.distKey, url: sourceLabel,
+    args: entry.args ?? [], registryCommit: REGISTRY_COMMIT,
     installDir, binDir, binaryPath: link, harnessPath,
     alreadyInstalled: false, error: null, notes,
   };
@@ -392,6 +489,6 @@ export async function probeLocal(): Promise<ProbeResult> {
     arch: target.arch,
     binaryPath,
     harnessPath,
-    error: binaryPath ? null : `\`${binaryName}\` was not found on PATH. Install it with \`bb antigravity-acp install\`.`,
+    error: binaryPath ? null : `\`${binaryName}\` was not found on PATH. Install it with \`bb google-antigravity-acp install\`.`,
   };
 }

@@ -1,4 +1,4 @@
-# bb-plugin-antigravity-acp
+# bb-plugin-google-antigravity-acp
 
 Google Antigravity as a first-class bb agent provider through Antigravity's
 official **ACP** server (`agy_acp_server.par`).
@@ -8,41 +8,48 @@ builtin ACP agents:
 
 - `server.ts` — `bb.providers.register` with the launch spec in
   `experimental_bridgeOptions.acpLaunchSpec`; plugin settings for install
-  paths; the `bb antigravity-acp status` and `bb antigravity-acp install`
-  commands.
+  paths; the `bb google-antigravity-acp status` and
+  `bb google-antigravity-acp install` commands.
 - `host.ts` — re-exports the canonical ACP provider bridge
   (`@get-bb/plugin-sdk/provider-bridge/acp`, the same bridge the builtin
   `provider-acp` plugin uses) and implements the host RPC the install/status
   commands call, so installs run on the target machine, not on the bb server.
 - `install.ts` — shared install logic: resolves the official distribution
-  from the ACP registry, downloads, extracts, and links the server binary and
-  sandbox helper onto PATH (no environment variables needed).
-- `icons/antigravity.svg` — provider mark (path-shaped, theme-tinted).
+  from the ACP registry (pinned to a commit SHA), downloads, safely extracts,
+  and links the server binary and sandbox helper onto PATH (no environment
+  variables needed).
+- `icons/google-antigravity.svg` — provider mark (path-shaped, theme-tinted).
 
 ## Install the plugin
 
 ```sh
-bb plugin install .      # from this directory
-bb plugin reload antigravity-acp
+bb plugin install .                  # from this directory
+bb plugin reload google-antigravity-acp
 ```
 
 ## Install the server binary
 
 ```sh
-bb antigravity-acp install
+bb google-antigravity-acp install
 ```
 
 The command runs on the machine that will launch the agent (the current
 thread's host, or `--machine <id-or-name>` to pick another enrolled machine):
 
 - detects the platform/arch and takes the official zip URL for it from the
-  ACP registry (`agentclientprotocol/registry` → `antigravity-acp`), falling
-  back to a pinned copy embedded in the plugin;
+  ACP registry (`agentclientprotocol/registry` → `antigravity-acp`, pinned to
+  `REGISTRY_COMMIT` in `install.ts`), falling back to a pinned copy embedded
+  in the plugin;
 - downloads and extracts into `~/.local/opt/agy-acp-server` (configurable via
-  `--install-dir`, or the `installDir` plugin setting);
+  `--install-dir`, or the `installDir` plugin setting). Extraction never uses
+  `tar` (bsdtar does not sanitize `../` zip entries); it uses `unzip` or a
+  validated `python3` zipfile extraction, and PowerShell's `Expand-Archive`
+  on Windows;
 - symlinks `agy_acp_server.par` and its sandbox helper `localharness_external`
   into `~/.local/bin` (configurable via `--bin-dir` / `binDir`); on Windows it
-  copies them and appends the dir to the user PATH;
+  copies them and only appends the dir to the user PATH when you pass
+  `--update-path` (setx permanently edits `HKCU\Environment` — opt in
+  explicitly, and be aware of its 1024-character truncation limit);
 - makes the binaries executable and records the install in a manifest.
 
 Install once per machine that should run Antigravity threads. The provider
@@ -52,8 +59,8 @@ links both into `binDir`), so no per-machine environment variables are
 needed.
 
 ```sh
-bb antigravity-acp install --machine macbook        # this machine
-bb antigravity-acp install --machine other-host     # another enrolled machine
+bb google-antigravity-acp install --machine macbook        # this machine
+bb google-antigravity-acp install --machine other-host     # another enrolled machine
 ```
 
 The machine's daemon shell must have `binDir` on PATH. The command warns
@@ -62,10 +69,11 @@ when it is not; pick a dir that is (e.g. `/usr/local/bin`) with `--bin-dir`.
 Useful flags:
 
 ```sh
-bb antigravity-acp install --machine macbook        # install on a specific machine
-bb antigravity-acp install --force                  # re-download even if already installed
-bb antigravity-acp install --from ./agy-acp.zip     # explicit source (URL or local file)
-bb antigravity-acp install --json                   # machine-readable output
+bb google-antigravity-acp install --machine macbook        # install on a specific machine
+bb google-antigravity-acp install --force                  # re-download even if already installed
+bb google-antigravity-acp install --from ./agy-acp.zip     # explicit source (URL or local file)
+bb google-antigravity-acp install --update-path            # also append binDir to the user PATH (Windows)
+bb google-antigravity-acp install --json                   # machine-readable output
 ```
 
 `~/.local/bin` must be on the machine's PATH for the provider health probe to
@@ -74,11 +82,23 @@ find the server. The command warns when it is not.
 ## Verify
 
 ```sh
-bb antigravity-acp status            # where the server is, per machine
-bb provider list                     # acp-antigravity appears (visibility: installed)
+bb google-antigravity-acp status        # where the server is, per machine
+bb provider list                        # acp-antigravity appears (visibility: installed)
 bb provider models acp-antigravity
 bb thread spawn --provider acp-antigravity --prompt 'hi'
 ```
+
+## Security notes
+
+- The ACP registry is fetched from a **pinned commit** (`REGISTRY_COMMIT`),
+  never from an unpinned branch, so a registry compromise cannot inject an
+  arbitrary binary onto PATH.
+- The download source is explicit: the pinned registry URL, or an explicit
+  `--from` flag. There is no environment-variable redirect.
+- Extraction validates archive entries and refuses `../`/absolute paths.
+- No code from this plugin executes the downloaded file except impossible —
+  the server binary itself (`agy_acp_server.par`), which is Google's official
+  release, is what the provider runs.
 
 ## Auth
 

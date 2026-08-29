@@ -1,5 +1,6 @@
-// bb-plugin-antigravity-acp — Google Antigravity as a first-class bb agent
-// provider through the official Antigravity ACP server (`agy_acp_server.par`).
+// bb-plugin-google-antigravity-acp — Google Antigravity as a first-class bb
+// agent provider through the official Antigravity ACP server
+// (`agy_acp_server.par`).
 //
 // The provider id is `acp-antigravity` (same family "acp" as the builtin ACP
 // agents). Everything agent-specific the bridge needs travels in
@@ -7,16 +8,16 @@
 // canonical ACP bridge shipped in host.ts.
 import { type BbPluginApi, type PluginCliContext } from "@get-bb/plugin-sdk";
 import { agyHostContract } from "./contract.js";
-import { probeLocal, runInstall, type InstallResult } from "./install.js";
+import { FALLBACK_DIST, detectTarget, probeLocal, runInstall, type InstallResult } from "./install.js";
 
 const PROVIDER_ID = "acp-antigravity";
 
 export default async function plugin(bb: BbPluginApi) {
   // Where the ACP server lives on target machines. Installs run on each host
-  // (`bb antigravity-acp install [--machine ...]`), so `~` expands per host.
-  // The launch spec sets no env: the server binary and its sandbox helper are
-  // linked into binDir on every machine and found via PATH, like bb's builtin
-  // ACP agents.
+  // (`bb google-antigravity-acp install [--machine ...]`), so `~` expands per
+  // host. The launch spec sets no env: the server binary and its sandbox
+  // helper are linked into binDir on every machine and found via PATH, like
+  // bb's builtin ACP agents.
   const settings = bb.settings.define({
     installDir: {
       type: "string",
@@ -33,18 +34,26 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const saved = await settings.get();
 
+  // Launch args come from the ACP registry (mirrored in FALLBACK_DIST): the
+  // registry specifies `--uid=` for linux-x86_64/linux-aarch64 only. The
+  // launch spec is registered server-side, so platform resolution uses the
+  // server's own platform — the common case where bb runs on the same machine
+  // that launches the agent. Installs record the per-platform args in their
+  // manifest too.
+  const launchArgs = FALLBACK_DIST[detectTarget().distKey]?.args ?? [];
+
   // Immutable launch facts for the ACP server process.
   const LAUNCH = {
     displayName: "Google Antigravity",
     // Found on PATH (install to ~/.local/bin or equivalent). Health probes use
     // `which`; an absolute path also works.
     command: "agy_acp_server.par",
-    args: [] as string[],
+    args: launchArgs,
     // Env stays empty on purpose: the ACP server resolves its sandbox helper
-    // `localharness_external` from PATH, and `bb antigravity-acp install`
-    // links both the server binary and the helper into binDir on every
-    // machine. A single baked-in ANTIGRAVITY_HARNESS_PATH value would be
-    // wrong on every other machine (settings are shared across hosts).
+    // `localharness_external` from PATH, and `bb google-antigravity-acp
+    // install` links both the server binary and the helper into binDir on
+    // every machine. A single baked-in ANTIGRAVITY_HARNESS_PATH value would
+    // be wrong on every other machine (settings are shared across hosts).
     env: {} as Record<string, string>,
   };
 
@@ -54,7 +63,7 @@ export default async function plugin(bb: BbPluginApi) {
     id: PROVIDER_ID,
     displayName: "Google Antigravity",
     family: "acp",
-    icon: "./icons/antigravity.svg",
+    icon: "./icons/google-antigravity.svg",
     strings: {
       // The Antigravity server authenticates in-band (ACP auth requests):
       // oauth-personal (Google account), oauth-business (Gemini Enterprise),
@@ -96,20 +105,20 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.cli.register({
-    name: "antigravity-acp",
+    name: "google-antigravity-acp",
     summary: "Inspect and install the Google Antigravity ACP provider",
     commands: [
       {
         name: "status",
         summary: "Show the ACP server binary location and provider id",
-        usage: "bb antigravity-acp status [--machine <id-or-name>] [--json]",
+        usage: "bb google-antigravity-acp status [--machine <id-or-name>] [--json]",
       },
       {
         name: "install",
         summary:
-          "Install the Antigravity ACP server on a machine: downloads the official zip, extracts it, links the binaries onto PATH, sets the sandbox helper path",
+          "Install the Antigravity ACP server on a machine: downloads the official zip, extracts it, links the binaries onto PATH, sets the sandbox helper path. Windows PATH mutation only with --update-path",
         usage:
-          "bb antigravity-acp install [--machine <id-or-name>] [--force] [--install-dir <path>] [--bin-dir <path>] [--from <url-or-zip>] [--json]",
+          "bb google-antigravity-acp install [--machine <id-or-name>] [--force] [--install-dir <path>] [--bin-dir <path>] [--from <url-or-zip>] [--update-path] [--json]",
       },
     ],
     async run(argv, ctx) {
@@ -144,6 +153,7 @@ export default async function plugin(bb: BbPluginApi) {
       providerId: PROVIDER_ID,
       displayName: LAUNCH.displayName,
       command: LAUNCH.command,
+      launchArgs: LAUNCH.args,
       target: target.hostId
         ? `${target.label}${probe.ok ? "" : " (probe failed)"}`
         : target.error ?? "this machine (server)",
@@ -156,7 +166,7 @@ export default async function plugin(bb: BbPluginApi) {
       hint:
         probe.ok
           ? "Ready. The provider appears in `bb provider list` when the bridge health probe passes."
-          : probe.error ?? "Not installed. Run `bb antigravity-acp install`.",
+          : probe.error ?? "Not installed. Run `bb google-antigravity-acp install`.",
     };
     return {
       exitCode: 0,
@@ -164,6 +174,7 @@ export default async function plugin(bb: BbPluginApi) {
         `providerId:    ${status.providerId}`,
         `displayName:   ${status.displayName}`,
         `command:       ${status.command}`,
+        `launchArgs:    ${status.launchArgs.length ? status.launchArgs.join(" ") : "(none)"}`,
         `target:        ${status.target}`,
         `platform:      ${status.platform}`,
         `binary:        ${status.resolvedBinary ?? "NOT FOUND"}`,
@@ -183,6 +194,7 @@ export default async function plugin(bb: BbPluginApi) {
   ): Promise<{ exitCode: number; stdout: string; stderr?: string }> {
     const json = argv.includes("--json");
     const force = argv.includes("--force");
+    const updatePath = argv.includes("--update-path");
     const machine = flagValue(argv, "--machine");
     const installDirFlag = flagValue(argv, "--install-dir");
     const binDirFlag = flagValue(argv, "--bin-dir");
@@ -201,12 +213,12 @@ export default async function plugin(bb: BbPluginApi) {
         where = `${target.label} (${target.hostId})`;
         result = await host.call(
           "install",
-          { installDir, binDir, force, source },
+          { installDir, binDir, force, updatePath, source },
           { hostId: target.hostId, signal: ctx.signal },
         );
       } else {
         where = "this machine (server-local)";
-        result = await runInstall({ installDir, binDir, force, source });
+        result = await runInstall({ installDir, binDir, force, updatePath, source });
       }
     } catch (err) {
       return finish(json, null, `Install failed: ${(err as Error).message}`);
@@ -223,10 +235,11 @@ export default async function plugin(bb: BbPluginApi) {
       `binDir:       ${result.binDir}`,
       `binary:       ${result.binaryPath ?? "NOT FOUND"}`,
       `harnessPath:  ${result.harnessPath ?? "NOT FOUND"}`,
+      `launchArgs:   ${result.args.length ? result.args.join(" ") : "(none)"}`,
     ];
     for (const note of result.notes) lines.push(`  - ${note}`);
     lines.push("");
-    lines.push("Next: `bb antigravity-acp status`, then `bb provider list` (the provider appears once the health probe passes).");
+    lines.push("Next: `bb google-antigravity-acp status`, then `bb provider list` (the provider appears once the health probe passes).");
 
     return finish(json, result, null, lines.join("\n"));
   }
