@@ -9,12 +9,15 @@
 // The same artifact also implements the plugin's host RPC (`bb
 // google-antigravity-acp install` / `status`), so installs run on the machine
 // where the daemon executes instead of on the bb server.
-import {
-  experimental_acpProviderBridge as experimental_providerBridge,
-} from "@get-bb/plugin-sdk/provider-bridge/acp";
+import { experimental_acpProviderBridge as canonicalBridge } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
+import { withProviderEnforcedApprovals } from "./approval-enforcement.js";
 import { agyHostContract } from "./contract.js";
 import { probeLocal, runInstall } from "./install.js";
+
+// See approval-enforcement.ts: without this, a turn started by another
+// thread auto-denies every approval and Antigravity locks the session.
+const experimental_providerBridge = withProviderEnforcedApprovals(canonicalBridge);
 
 export { experimental_providerBridge };
 
